@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AI weight visualizer</title>
+<style>
+:root{color-scheme:dark;--background:#12161d;--foreground:#e6ebf3;--muted-foreground:#a7b3c3;--border:#465364;--viz-series-1:#74b4ff;--viz-series-2:#e8b574;--viz-series-3:#90cfa4;--viz-series-4:#c4a0ee;--viz-series-5:#ed99ad;--viz-series-6:#73d1d3}
+*{box-sizing:border-box}body{margin:0;padding:32px 24px;background:var(--background);color:var(--foreground);font:15px/1.5 system-ui,sans-serif}#weight-sectors{max-width:1080px;margin:0 auto}h1{font-size:24px;font-weight:500;margin:0 0 4px;overflow-wrap:anywhere}.text-small{font-size:13px}.text-muted{color:var(--muted-foreground)}.tabular-nums{font-variant-numeric:tabular-nums}.viz-controls{display:flex;gap:24px;flex-wrap:wrap}.form-label{display:flex;flex:1;flex-direction:column;gap:6px;min-width:140px}.form-range{width:100%;accent-color:var(--viz-series-1)}.viz-row{display:flex;flex-wrap:wrap;align-items:center;gap:14px}.btn{font:inherit;padding:8px 14px;border:1px solid var(--border);border-radius:6px;background:#222b38;color:var(--foreground);cursor:pointer}.btn:hover{background:#303d50}.btn:focus-visible,input:focus-visible{outline:2px solid var(--viz-series-1);outline-offset:3px}#ws-canvas{height:min(60vw,610px)!important;min-height:330px}noscript{display:block;padding:20px}@media(max-width:450px){body{padding:20px 14px}.btn{min-height:44px}}
+</style></head><body><noscript>Enable JavaScript to use the local weight viewer.</noscript>
+<div id="weight-sectors">
+  <h1 id="ws-title">Weight sphere</h1>
+  <div id="ws-summary" class="text-small text-muted"></div>
+  <div class="viz-controls" style="margin-top:16px">
+    <label class="form-label">Layer <span id="ws-layer-name" class="tabular-nums">All sectors</span><input id="ws-layer" class="form-range" type="range" min="0" max="1" step="1" value="0" aria-label="Layer, zero shows all sectors"></label>
+    <label class="form-label">Relief <span id="ws-relief-name" class="tabular-nums">0.80</span><input id="ws-relief" class="form-range" type="range" min="0" max="0.95" step="0.01" value="0.8" aria-label="Radial displacement strength"></label>
+  </div>
+  <div id="ws-legend" class="viz-row text-small" style="margin-top:8px" aria-label="Layer colors"></div>
+  <canvas id="ws-canvas" style="display:block;width:100%;height:430px;touch-action:none;cursor:grab" role="img" aria-label="Rotatable three-dimensional sphere. Equal longitude sectors represent transformer blocks. Positive weights extend outward, negative weights inward. Use the layer slider to isolate a block."></canvas>
+  <div class="viz-row"><button type="button" class="btn" id="ws-left" aria-label="Rotate sphere left">Rotate left</button><button type="button" class="btn" id="ws-right" aria-label="Rotate sphere right">Rotate right</button><span class="text-small text-muted">Drag to orbit · scroll to zoom</span></div>
+  <div id="ws-detail" class="text-small" style="margin-top:12px;min-height:3em;overflow-wrap:anywhere" aria-live="polite">Positive → outward · negative → inward · wireframe = zero</div>
+  <div class="text-small text-muted">Shared linear scale · uniform sample plus matrix extrema · embeddings, biases and normalization omitted</div>
+</div>
+<style>
+#weight-sectors {color:var(--foreground)}
+#weight-sectors .ws-swatch {display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
+#weight-sectors #ws-legend > span {white-space:nowrap}
+@media(max-width:450px){#weight-sectors #ws-canvas{height:340px!important}}
+</style>
+<script>
+(()=>{
+const root=document.getElementById('weight-sectors');
+const data=__WEIGHTS__;
+const $=s=>root.querySelector(s), canvas=$('#ws-canvas'), ctx=canvas.getContext('2d');
+const count=data.config.layers, colors=[], points=[], projected=[];
+$('#ws-title').textContent='Weight sphere · '+data.source;
+$('#ws-layer').max=count;
+$('#ws-summary').textContent=`${count} transformer blocks · ${data.parameters.toLocaleString()} parameters · ${data.sampleCount.toLocaleString()} displayed matrix weights`;
+
+let yaw=-0.32,pitch=0.3,zoom=1,chosen=-1,relief=0.8,width=0,height=0,queued=false,drag=null,moved=false;
+let foreground,border;
+function floats(s,Type){const b=Uint8Array.from(atob(s),c=>c.charCodeAt(0));return new Type(b.buffer)}
+for(let l=0;l<count;l++)for(const part of data.layers[l].parts){
+ const idx=floats(part.indices,Uint32Array),v=floats(part.values,Float32Array);
+ for(let j=0;j<idx.length;j++){
+  const flat=idx[j],row=Math.floor(flat/part.shape[1]),col=flat%part.shape[1];
+  // Equal-area latitude bands, proportional to matrix element counts.
+  // Longitude retains input-column order; latitude retains output-row order.
+  const y=1-2*(part.start+(row+0.5)*part.shape[1])/data.layers[l].count;
+  points.push({l,y,u:(col+0.5)/part.shape[1],v:v[j],part,row:row+part.rowOffset,col});
+ }
+}
+function resolve(token){const e=document.createElement('span');e.style.color=`var(${token})`;root.append(e);const c=getComputedStyle(e).color;e.remove();return c}
+function theme(){foreground=resolve('--foreground');border=resolve('--border');colors.length=0;for(let i=0;i<count;i++)colors.push(resolve('--viz-series-'+(i%6+1)));$('#ws-legend').innerHTML=colors.map((c,i)=>`<span><span class="ws-swatch" style="background:${c}"></span>Layer ${i+1}</span>`).join('');schedule()}
+function rotate(x,y,z){const xx=x*Math.cos(yaw)+z*Math.sin(yaw),zz=-x*Math.sin(yaw)+z*Math.cos(yaw);return [xx,y*Math.cos(pitch)-zz*Math.sin(pitch),y*Math.sin(pitch)+zz*Math.cos(pitch)]}
+function project(x,y,z){const p=rotate(x,y,z),f=3.6/(3.6-p[2]);const k=Math.min(width,height)*0.30*zoom;return [width/2+p[0]*k*f,height/2-p[1]*k*f,p[2],f]}
+function sphere(y,a,r=1){const t=Math.sqrt(Math.max(0,1-y*y));return project(r*t*Math.sin(a),r*y,r*t*Math.cos(a))}
+function wire(){
+ ctx.strokeStyle=border;ctx.lineWidth=1;ctx.globalAlpha=0.75;
+ function line(fn){ctx.beginPath();for(let j=0;j<=100;j++){const p=fn(j/100);j?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1])}ctx.stroke()}
+ for(const y of [-0.66,0,0.66])line(t=>sphere(y,t*2*Math.PI));
+ const n=chosen<0?count:4;
+ for(let s=0;s<n;s++)line(t=>sphere(1-2*t,s*2*Math.PI/n));
+ ctx.globalAlpha=1;
+}
+function draw(){
+ queued=false;ctx.clearRect(0,0,width,height);projected.length=0;
+ for(const p of points){if(chosen>=0&&p.l!==chosen)continue;
+  const sector=chosen<0?p.l:0,n=chosen<0?count:1;
+  const a=(sector+0.015+0.97*p.u)*2*Math.PI/n;
+  const radius=1+relief*p.v/(data.scale || 1);
+  const q=sphere(p.y,a,radius),b=sphere(p.y,a);
+  projected.push({p,q,b});
+ }
+ projected.sort((a,b)=>a.q[2]-b.q[2]);
+ // Faint back hemisphere; front weights remain individually inspectable.
+ for(const t of projected){if(t.q[2]>=0)continue;ctx.globalAlpha=0.15;ctx.fillStyle=colors[t.p.l];ctx.fillRect(t.q[0],t.q[1],1.2,1.2)}
+ wire();
+ for(const t of projected){if(t.q[2]<0)continue;
+  const strength=Math.abs(t.p.v)/(data.scale || 1);
+  if(strength>0.12){ctx.globalAlpha=0.2+strength*0.5;ctx.strokeStyle=colors[t.p.l];ctx.beginPath();ctx.moveTo(t.b[0],t.b[1]);ctx.lineTo(t.q[0],t.q[1]);ctx.stroke()}
+  ctx.globalAlpha=0.60+Math.min(strength,0.4);ctx.fillStyle=colors[t.p.l];const sz=1.35+strength*1.8;ctx.fillRect(t.q[0]-sz/2,t.q[1]-sz/2,sz,sz);
+ }
+ ctx.globalAlpha=1;
+}
+function schedule(){if(!queued){queued=true;requestAnimationFrame(draw)}}
+function resize(){const r=canvas.getBoundingClientRect();width=r.width;height=r.height;const d=Math.min(devicePixelRatio||1,2);canvas.width=Math.round(width*d);canvas.height=Math.round(height*d);ctx.setTransform(d,0,0,d,0,0);schedule()}
+function summary(){if(chosen<0)$('#ws-detail').textContent='Positive → outward · negative → inward · wireframe = zero';else{const l=data.layers[chosen];$('#ws-detail').textContent=`Layer ${chosen+1} · ${l.count.toLocaleString()} matrix weights · SD ${l.std.toFixed(4)} · full range ${l.min.toFixed(4)} to +${l.max.toFixed(4)}`}}
+$('#ws-layer').addEventListener('input',e=>{chosen=Number(e.target.value)-1;$('#ws-layer-name').textContent=chosen<0?'All sectors':` ${chosen+1} · expanded`;summary();schedule()});
+$('#ws-relief').addEventListener('input',e=>{relief=Number(e.target.value);$('#ws-relief-name').textContent=relief.toFixed(2);schedule()});
+$('#ws-left').onclick=()=>{yaw-=0.35;schedule()};$('#ws-right').onclick=()=>{yaw+=0.35;schedule()};
+canvas.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY};moved=false;canvas.setPointerCapture(e.pointerId);canvas.style.cursor='grabbing'});
+function inspect(e){const r=canvas.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;let best=null,dist=64;for(const t of projected){if(t.q[2]<0)continue;const d=(t.q[0]-x)**2+(t.q[1]-y)**2;if(d<dist){dist=d;best=t}}if(best){const p=best.p;$('#ws-detail').textContent=`Layer ${p.l+1} · ${p.part.label} · ${p.part.key}[${p.row}, ${p.col}] = ${p.v.toPrecision(6)}`}else summary()}
+canvas.addEventListener('pointermove',e=>{if(drag){const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if(Math.abs(dx)+Math.abs(dy)>2)moved=true;yaw+=dx*0.009;pitch=Math.max(-1.4,Math.min(1.4,pitch+dy*0.009));drag={x:e.clientX,y:e.clientY};schedule()}else inspect(e)});
+canvas.addEventListener('pointerup',e=>{drag=null;canvas.style.cursor='grab';if(!moved)inspect(e)});
+canvas.addEventListener('pointercancel',()=>{drag=null;canvas.style.cursor='grab'});
+canvas.addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(0.65,Math.min(1.65,zoom*Math.exp(-e.deltaY*0.001)));schedule()},{passive:false});
+new ResizeObserver(resize).observe(canvas);
+new MutationObserver(theme).observe(document.documentElement,{attributes:true,attributeFilter:['class','style','data-theme']});
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',theme);
+theme();resize();
+})();
+</script>
+
+</body></html>
